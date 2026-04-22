@@ -7,12 +7,12 @@ interface ExtWebSocket extends WebSocket {
     roomId ?: string;
 }
 interface SignalingMessage {
-    type: "join" | "offer" | "answer" | "peer-joined" | "peer-disconnected" | "error";
+    type: "join" | "offer" | "ice-candidate" | "answer" | "peer-joined" | "peer-disconnected" | "error";
     roomId: string;
     payload?: any;
 }
 interface broadcastMessage {
-    type: "offer" | "answer" | "peer-joined" | "peer-disconnected" | "error";
+    type: "offer" | "answer" | "ice-candidate" | "peer-joined" | "peer-disconnected" | "error";
     payload?: any;
 }
 
@@ -29,7 +29,7 @@ wss.on("connection", (ws: ExtWebSocket)=>{
         const {type, roomId, payload} = message;
 
         // if the type if offer or answer we need to just relay it to other side for handshake
-        if (type === "offer" || type === "answer"){
+        if (type === "offer" || type === "answer" || type === "ice-candidate"){
 
             broadcastToOther(ws, roomId, {type, payload});
         }
@@ -101,6 +101,7 @@ function broadcastToOther(ws: ExtWebSocket, roomId: string, message: broadcastMe
 }
 
 app.use(cors());
+
 // Health-check route
 app.get('/', (req, res)=>{
     res.send("Signalling server is alive...");

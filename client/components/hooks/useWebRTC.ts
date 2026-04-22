@@ -1,3 +1,4 @@
+import { Coming_Soon } from "next/font/google";
 import { useEffect, useRef, useState } from "react";
 
 const wsURL = process.env.NEXT_PUBLIC_WEBSOCKET_URL;
@@ -20,6 +21,7 @@ export function useWebRTC(
 
   const ws = useRef<WebSocket | null>(null);
   const peerConn = useRef<RTCPeerConnection | null>(null);
+  const iceCandidateQueue = useRef<RTCIceCandidateInit[]>([]);
 
   // STALE CLOSURE FIX: Always keep the latest message handler in a ref
   const onMessageRef = useRef(onMessage);
@@ -50,8 +52,24 @@ export function useWebRTC(
       } else if (type === "offer") {
         initializeWebRTC();
         await createAnswer(payload);
+        addCandidates();
       } else if (type === "answer") {
-        await peerConn.current!.setRemoteDescription(payload);
+        if (!peerConn.current) {
+          console.log("No RTC Connection found to set Remote Desc...");
+        } else {
+          await peerConn.current.setRemoteDescription(payload);
+          addCandidates();
+        }
+      } else if (type === "ice-candidate") {
+        console.log("Adding ICE candidate");
+        if (!peerConn.current) {
+          console.log("No peer Connection to add ice candidate!!");
+        } else if (peerConn.current.remoteDescription && peerConn.current.remoteDescription.type) {
+          await peerConn.current.addIceCandidate(payload);
+
+        } else {
+          iceCandidateQueue.current.push(payload);
+        }
       } else if (type === "peer-disconnected") {
         alert("Peer disconnected!!");
         await onDisconnectRef.current();
@@ -95,7 +113,7 @@ export function useWebRTC(
       console.log("WebRTC Status: ", peerConn.current?.connectionState);
 
       if (peerConn.current?.connectionState === "disconnected" || peerConn.current?.connectionState === "failed") {
-        console.warn("WebRTC connection physically dropped!");
+        console.warn("WebRTC connection physically dropped!", peerConn.current.connectionState);
         onDisconnectRef.current();
         setStatus("waiting")
       } else if (peerConn.current?.connectionState === "connected") {
@@ -103,70 +121,108 @@ export function useWebRTC(
       }
     };
 
+    peerConn.current.onicecandidate = (e) => {
+      if (e.candidate) {
+        ws.current!.send(
+          JSON.stringify({
+            type: "ice-candidate",
+            roomId,
+            payload: e.candidate
+          })
+        )
+      }
+    };
+
   }
 
-
-const setupDataChannel = () => {
-  if (!dataChannelRef.current) return;
-
-  dataChannelRef.current.binaryType = "arraybuffer";
-
-  dataChannelRef.current.onopen = () => setStatus("connected");
-  dataChannelRef.current.onclose = () => {
-    setStatus("waiting");
-    onDisconnectRef.current?.();
-  }
-
-  // We attach the File Transfer logic directly into the open pipe here
-  dataChannelRef.current.onmessage = (e) => onMessageRef.current(e);
-};
-
-const createOffer = async () => {
-  console.log("Creating offer and data channel");
-  dataChannelRef.current = peerConn.current!.createDataChannel("Lane");
-  setupDataChannel();
-
-  const offer = await peerConn.current!.createOffer();
-
-  peerConn.current!.onicecandidate = (e) => {
-    if (!e.candidate) {
-      ws.current!.send(
-        JSON.stringify({
-          type: "offer",
-          roomId,
-          payload: peerConn.current!.localDescription,
-        })
-      );
+  function addCandidates() {
+    if (!peerConn.current) {
+      console.log("No peerConnection Found");
+      return;
     }
+
+    iceCandidateQueue.current.forEach((candidate) => {
+      peerConn.current!.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+    });
+
+    iceCandidateQueue.current = [];
+  }
+
+
+  const setupDataChannel = () => {
+    if (!dataChannelRef.current) return;
+
+    dataChannelRef.current.binaryType = "arraybuffer";
+
+    dataChannelRef.current.onopen = () => setStatus("connected");
+    dataChannelRef.current.onclose = () => {
+      setStatus("waiting");
+      onDisconnectRef.current?.();
+    }
+
+    // We attach the File Transfer logic directly into the open pipe here
+    dataChannelRef.current.onmessage = (e) => onMessageRef.current(e);
   };
 
-  await peerConn.current!.setLocalDescription(offer);
-};
+  const createOffer = async () => {
+    if (!peerConn.current) {
+      console.log("No RTCwebConnection initialized...");
+      return;
+    }
 
-const createAnswer = async (remoteDesc: RTCSessionDescription) => {
-  await peerConn.current!.setRemoteDescription(remoteDesc);
+    try {
+      console.log("Creating offer and data channel");
+      dataChannelRef.current = peerConn.current.createDataChannel("Lane");
+      setupDataChannel();
 
-  peerConn.current!.ondatachannel = (e) => {
-    dataChannelRef.current = e.channel;
-    setupDataChannel();
+      const offer = await peerConn.current.createOffer();
+      await peerConn.current.setLocalDescription(offer);
+
+      ws.current!.send(JSON.stringify({
+        type: "offer",
+        roomId,
+        payload: peerConn.current.localDescription
+      }))
+    }
+    catch (err) {
+      console.error("Error creating offer", err);
+    }
+
   };
 
-  const answer = await peerConn.current!.createAnswer();
+  const createAnswer = async (remoteDesc: RTCSessionDescription) => {
+    if (!peerConn.current) {
+      console.log("No RTCwebConnection Found...");
+      return;
 
-  peerConn.current!.onicecandidate = (e) => {
-    if (!e.candidate) {
+    }
+
+    try {
+      console.log("Creating an answer and settting up data channel!!");
+
+      await peerConn.current.setRemoteDescription(remoteDesc);
+      
+      peerConn.current.ondatachannel = (e) => {
+        dataChannelRef.current = e.channel;
+        setupDataChannel();
+      };
+  
+      const answer = await peerConn.current.createAnswer();
+      await peerConn.current.setLocalDescription(answer);
+  
       ws.current!.send(
         JSON.stringify({
           type: "answer",
           roomId,
-          payload: peerConn.current!.localDescription,
+          payload: peerConn.current.localDescription,
         })
       );
+
+    } catch (error) {
+      console.error("Cant create answer...", error);
     }
+
   };
 
-  await peerConn.current!.setLocalDescription(answer);
-};
-
-return { status, errorMessage };
+  return { status, errorMessage };
 }
